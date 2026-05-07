@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Owen · Budget</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#070b14;font-family:'Inter',system-ui,sans-serif;color:#e2e8f0;min-height:100vh}
+  input[type=range]{-webkit-appearance:none;appearance:none;height:4px;border-radius:99px;outline:none;cursor:pointer}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;cursor:pointer;background:#6366f1}
+  ::-webkit-scrollbar{width:6px} ::-webkit-scrollbar-track{background:#0a0e1a} ::-webkit-scrollbar-thumb{background:#1e3a5f;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useEffect,useCallback,useRef}=React;
+
+const BASE_INCOME=3240,FREELANCE_BASE=500,TAX_RATE=0.1413+0.12;
+const COLORS=["#6366f1","#8b5cf6","#a855f7","#06b6d4","#10b981","#f59e0b","#ec4899","#f97316","#64748b","#e11d48","#84cc16","#0ea5e9"];
+const DEFAULT_CATS=[
+  {id:1,label:"Gear / Equipment",color:"#6366f1",max:2000,deductible:true,val:300},
+  {id:2,label:"Spec Ad Fund",color:"#8b5cf6",max:1000,deductible:true,val:500},
+  {id:3,label:"Software & Subs",color:"#06b6d4",max:500,deductible:true,val:100},
+  {id:4,label:"Crew / Services",color:"#10b981",max:1000,deductible:true,val:150},
+  {id:5,label:"Savings",color:"#f59e0b",max:2000,deductible:false,val:500},
+  {id:6,label:"Transportation",color:"#ec4899",max:800,deductible:false,val:200},
+  {id:7,label:"Personal / Fun",color:"#f97316",max:1000,deductible:false,val:300},
+  {id:8,label:"Misc / Buffer",color:"#64748b",max:800,deductible:false,val:150},
+];
+
+const fmt=n=>"$"+Math.round(Math.abs(n)).toLocaleString();
+const pct=(v,i)=>i>0?((v/i)*100).toFixed(1):"0.0";
+const monthKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+const monthLabel=d=>d.toLocaleString("default",{month:"long",year:"numeric"});
+let nextId=20;
+
+function AnimatedNumber({value}){
+  const[display,setDisplay]=useState(value);
+  const ref=useRef(value);
+  useEffect(()=>{
+    const start=ref.current,end=value,dur=280,t0=performance.now();
+    const tick=t=>{
+      const p=Math.min((t-t0)/dur,1),e=1-Math.pow(1-p,3);
+      setDisplay(Math.round(start+(end-start)*e));
+      if(p<1)requestAnimationFrame(tick);else ref.current=end;
+    };
+    requestAnimationFrame(tick);
+  },[value]);
+  return React.createElement(React.Fragment,null,"$"+display.toLocaleString());
+}
+
+function PieChart({slices,size=190}){
+  const total=slices.reduce((a,s)=>a+s.val,0);
+  if(!total)return null;
+  const cx=size/2,cy=size/2,r=size/2-2;
+  let angle=-Math.PI/2;
+  const paths=slices.filter(s=>s.val>0).map(s=>{
+    const sw=(s.val/total)*2*Math.PI;
+    const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
+    angle+=sw;
+    const x2=cx+r*Math.cos(angle),y2=cy+r*Math.sin(angle);
+    return{...s,path:`M${cx},${cy} L${x1},${y1} A${r},${r},0,${sw>Math.PI?1:0},1,${x2},${y2} Z`};
+  });
+  return(
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{filter:"drop-shadow(0 4px 24px #0005)"}}>
+      <circle cx={cx} cy={cy} r={r} fill="#0a0e1a"/>
+      {paths.map((p,i)=><path key={i} d={p.path} fill={p.color} stroke="#070b14" strokeWidth="1.5"><title>{p.label}: {fmt(p.val)}</title></path>)}
+      <circle cx={cx} cy={cy} r={r*0.52} fill="#070b14"/>
+      <text x={cx} y={cy-8} textAnchor="middle" fill="#94a3b8" fontSize="9" fontFamily="Inter,system-ui">ALLOCATED</text>
+      <text x={cx} y={cy+10} textAnchor="middle" fill="#f1f5f9" fontSize="15" fontWeight="700" fontFamily="Inter,system-ui">{fmt(total)}</text>
+    </svg>
+  );
+}
+
+function App(){
+  const now=new Date();
+  const[currentDate,setCurrentDate]=useState(now);
+  const[allMonths,setAllMonths]=useState([]);
+  const[cats,setCats]=useState(DEFAULT_CATS);
+  const[spillover,setSpillover]=useState(0);
+  const[spilloverRaw,setSpilloverRaw]=useState("");
+  const[spilloverType,setSpilloverType]=useState("above");
+  const[spillBizPct,setSpillBizPct]=useState(70);
+  const[adding,setAdding]=useState(false);
+  const[newLabel,setNewLabel]=useState("");
+  const[newMax,setNewMax]=useState("500");
+  const[newDed,setNewDed]=useState(false);
+  const[editId,setEditId]=useState(null);
+  const[activeTooltip,setActiveTooltip]=useState(null);
+  const[hovered,setHovered]=useState(null);
+  const[showAnnual,setShowAnnual]=useState(false);
+  const[showMonths,setShowMonths]=useState(false);
+
+  const key=monthKey(currentDate);
+  const isCurrentMonth=monthKey(now)===key;
+
+  // Load all saved months index
+  useEffect(()=>{
+    const idx=JSON.parse(localStorage.getItem("budget_months")||"[]");
+    setAllMonths(idx);
+  },[]);
+
+  // Load month data when date changes
+  useEffect(()=>{
+    const saved=localStorage.getItem(`budget_${key}`);
+    if(saved){
+      const d=JSON.parse(saved);
+      setCats(d.cats||DEFAULT_CATS);
+      setSpillover(d.spillover||0);
+      setSpilloverRaw(d.spillover?String(d.spillover):"");
+      setSpilloverType(d.spilloverType||"above");
+      setSpillBizPct(d.spillBizPct||70);
+    } else {
+      setCats(DEFAULT_CATS.map(c=>({...c})));
+      setSpillover(0);setSpilloverRaw("");setSpilloverType("above");setSpillBizPct(70);
+    }
+  },[key]);
+
+  // Auto-save on any change
+  useEffect(()=>{
+    const data={cats,spillover,spilloverType,spillBizPct};
+    localStorage.setItem(`budget_${key}`,JSON.stringify(data));
+    // Update month index
+    const idx=JSON.parse(localStorage.getItem("budget_months")||"[]");
+    if(!idx.includes(key)){
+      const updated=[...idx,key].sort();
+      localStorage.setItem("budget_months",JSON.stringify(updated));
+      setAllMonths(updated);
+    }
+  },[cats,spillover,spilloverType,spillBizPct,key]);
+
+  const setVal=useCallback((id,v)=>setCats(p=>p.map(c=>c.id===id?{...c,val:+v}:c)),[]);
+  const toggleDed=useCallback((id)=>setCats(p=>p.map(c=>c.id===id?{...c,deductible:!c.deductible}:c)),[]);
+  const remove=useCallback((id)=>setCats(p=>p.filter(c=>c.id!==id)),[]);
+
+  const addCat=()=>{
+    if(!newLabel.trim())return;
+    const used=cats.map(c=>c.color);
+    const color=COLORS.find(c=>!used.includes(c))||COLORS[nextId%COLORS.length];
+    setCats(p=>[...p,{id:nextId++,label:newLabel.trim(),color,max:+newMax||500,deductible:newDed,val:0}]);
+    setNewLabel("");setNewMax("500");setNewDed(false);setAdding(false);
+  };
+
+  const navMonth=(dir)=>{
+    const d=new Date(currentDate);
+    d.setMonth(d.getMonth()+dir);
+    setCurrentDate(d);
+  };
+
+  const spilloverTaxable=spilloverType==="above"?spillover:0;
+  const totalIncome=BASE_INCOME+FREELANCE_BASE+spillover;
+  const declaredIncome=BASE_INCOME+FREELANCE_BASE+spilloverTaxable;
+  const totalDed=cats.filter(c=>c.deductible).reduce((a,c)=>a+c.val,0);
+  const taxableInc=Math.max(0,declaredIncome-totalDed);
+  const taxOwed=Math.round(taxableInc*TAX_RATE);
+  const taxSaved=Math.round(declaredIncome*TAX_RATE)-taxOwed;
+  const catTotal=cats.reduce((a,c)=>a+c.val,0);
+  const totalAlloc=catTotal+taxOwed;
+  const remaining=totalIncome-totalAlloc;
+  const over=remaining<0;
+  const spillBiz=Math.round(spillover*(spillBizPct/100));
+  const spillSav=spillover-spillBiz;
+  const dedPct=catTotal>0?Math.round((totalDed/catTotal)*100):0;
+  const savingsRate=totalIncome>0?((cats.find(c=>c.id===5)?.val||0)/totalIncome*100).toFixed(1):"0.0";
+  const quarterlyTax=Math.round(taxOwed*3);
+
+  const pieSlices=[
+    ...cats.map(c=>({label:c.label,val:c.val,color:c.color})),
+    {label:"Taxes",val:taxOwed,color:"#ef4444"},
+    ...(remaining>0?[{label:"Unallocated",val:remaining,color:"#1e293b"}]:[]),
+  ];
+
+  const inp={background:"#0f1623",border:"1px solid #1e3a5f",borderRadius:6,padding:"8px 11px",color:"#e2e8f0",fontSize:13,outline:"none",width:"100%"};
+  const S={padding:"32px 18px",maxWidth:640,margin:"0 auto"};
+
+  const monthLabelFromKey=k=>{
+    const[y,m]=k.split("-");
+    return new Date(+y,+m-1,1).toLocaleString("default",{month:"long",year:"numeric"});
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:"#070b14",padding:"32px 18px"}}>
+    <div style={{maxWidth:640,margin:"0 auto"}}>
+
+      {/* Top rule */}
+      <div style={{height:3,background:"linear-gradient(90deg,#6366f1,#8b5cf6,#06b6d4)",borderRadius:99,marginBottom:28}}/>
+
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,paddingBottom:20,borderBottom:"1px solid #0f1e35"}}>
+        <div>
+          <div style={{fontSize:9,letterSpacing:"0.18em",color:"#334155",textTransform:"uppercase",marginBottom:4}}>Financial Overview</div>
+          <h1 style={{margin:0,fontSize:22,fontWeight:700,color:"#f1f5f9",letterSpacing:"-0.4px"}}>Monthly Budget</h1>
+          <div style={{fontSize:11,color:"#334155",marginTop:3}}>Owen · 1099 Freelance · v2.0</div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:9,color:"#334155",letterSpacing:"0.1em",textTransform:"uppercase"}}>Total Income</div>
+          <div style={{fontSize:26,fontWeight:800,color:"#6366f1",letterSpacing:"-0.5px",fontVariantNumeric:"tabular-nums"}}><AnimatedNumber value={totalIncome}/></div>
+          <div style={{fontSize:10,color:"#334155",cursor:"pointer"}} onClick={()=>setShowAnnual(p=>!p)}>
+            {showAnnual?"hide annual ↑":"show annual ↓"}
+          </div>
+        </div>
+      </div>
+
+      {/* Month navigator */}
+      <div style={{background:"#0d1525",border:"1px solid #0f1e35",borderRadius:10,padding:"10px 16px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <button onClick={()=>navMonth(-1)} style={{background:"none",border:"none",color:"#6366f1",fontSize:18,cursor:"pointer",padding:"0 8px"}}>‹</button>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9"}}>{monthLabel(currentDate)}</div>
+          {!isCurrentMonth&&<div style={{fontSize:10,color:"#f59e0b",marginTop:2}}>Viewing past month</div>}
+          {isCurrentMonth&&<div style={{fontSize:10,color:"#34d399",marginTop:2}}>Current month · auto-saving</div>}
+        </div>
+        <button onClick={()=>navMonth(1)} style={{background:"none",border:"none",color:isCurrentMonth?"#1e3a5f":"#6366f1",fontSize:18,cursor:isCurrentMonth?"default":"pointer",padding:"0 8px"}} disabled={isCurrentMonth}>›</button>
+      </div>
+
+      {/* Month history */}
+      {allMonths.length>1&&(
+        <div style={{marginBottom:16}}>
+          <button onClick={()=>setShowMonths(p=>!p)} style={{background:"none",border:"none",color:"#334155",fontSize:10,cursor:"pointer",letterSpacing:"0.1em",textTransform:"uppercase",padding:0}}>
+            {showMonths?"▲ Hide":"▼ All Saved Months"} ({allMonths.length})
+          </button>
+          {showMonths&&(
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:8}}>
+              {[...allMonths].reverse().map(k=>(
+                <button key={k} onClick={()=>setCurrentDate(new Date(k+"-15"))}
+                  style={{fontSize:10,padding:"4px 10px",borderRadius:6,border:"none",cursor:"pointer",fontWeight:600,
+                    background:monthKey(currentDate)===k?"#6366f1":"#0d1525",
+                    color:monthKey(currentDate)===k?"#fff":"#475569"}}>
+                  {monthLabelFromKey(k)}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Annual projection */}
+      {showAnnual&&(
+        <div style={{background:"#0d1525",border:"1px solid #1e3a5f",borderRadius:10,padding:"14px 16px",marginBottom:16,display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+          <div style={{fontSize:9,color:"#334155",textTransform:"uppercase",letterSpacing:"0.1em",gridColumn:"1/-1",marginBottom:2}}>Annual Projection (×12)</div>
+          {[{label:"Gross",val:totalIncome*12,col:"#6366f1"},{label:"Tax Owed",val:taxOwed*12,col:"#f87171"},{label:"Tax Saved",val:taxSaved*12,col:"#34d399"},{label:"Net Keep",val:(totalIncome-taxOwed)*12,col:"#94a3b8"}].map(k=>(
+            <div key={k.label}>
+              <div style={{fontSize:9,color:"#475569",marginBottom:2}}>{k.label}</div>
+              <div style={{fontSize:14,fontWeight:700,color:k.col,fontVariantNumeric:"tabular-nums"}}>{fmt(k.val)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* KPI row */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:10}}>
+        {[
+          {label:"Taxable Income",val:taxableInc,col:"#94a3b8",sub:null},
+          {label:"Tax Owed",val:taxOwed,col:"#f87171",sub:`Q est. ${fmt(quarterlyTax)}`},
+          {label:"Tax Saved",val:taxSaved,col:"#34d399",sub:null},
+          {label:"Remaining",val:Math.abs(remaining),col:over?"#f87171":"#6366f1",sub:over?"over budget":"unallocated"},
+        ].map(k=>(
+          <div key={k.label} style={{background:"#0d1525",border:"1px solid #0f1e35",borderLeft:`3px solid ${k.col}`,borderRadius:10,padding:"12px 13px"}}>
+            <div style={{fontSize:9,color:"#334155",textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:4}}>{k.label}</div>
+            <div style={{fontSize:16,fontWeight:700,color:k.col,fontVariantNumeric:"tabular-nums"}}><AnimatedNumber value={Math.round(k.val)}/></div>
+            {k.sub&&<div style={{fontSize:10,color:"#334155",marginTop:2}}>{k.sub}</div>}
+          </div>
+        ))}
+      </div>
+
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
+        <div style={{background:"#0d1525",border:"1px solid #0f1e35",borderRadius:10,padding:"10px 13px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:10,color:"#334155",textTransform:"uppercase",letterSpacing:"0.08em"}}>Savings Rate</span>
+          <span style={{fontSize:15,fontWeight:700,color:"#f59e0b",fontVariantNumeric:"tabular-nums"}}>{savingsRate}%</span>
+        </div>
+        <div style={{background:"#071a12",border:"1px solid #0d3321",borderRadius:10,padding:"10px 13px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:10,color:"#4ade80",textTransform:"uppercase",letterSpacing:"0.08em"}}>Writeoff Efficiency</span>
+          <span style={{fontSize:15,fontWeight:700,color:"#34d399",fontVariantNumeric:"tabular-nums"}}>{dedPct}%</span>
+        </div>
+      </div>
+
+      {/* Spillover */}
+      <div style={{background:"#0d1525",border:"1px solid #1e3a5f",borderRadius:10,padding:"14px 16px",marginBottom:16}}>
+        <div style={{fontSize:9,letterSpacing:"0.12em",color:"#334155",textTransform:"uppercase",marginBottom:12}}>Extra Freelance Income</div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,flex:1,minWidth:120}}>
+            <span style={{color:"#475569",fontSize:14}}>$</span>
+            <input type="text" inputMode="numeric" placeholder="0" value={spilloverRaw}
+              onChange={e=>{const v=e.target.value.replace(/\D/g,"");setSpilloverRaw(v);setSpillover(+v||0);}}
+              style={{...inp,padding:"7px 10px",fontSize:15,fontWeight:700,fontVariantNumeric:"tabular-nums"}}/>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            {["above","under"].map(t=>(
+              <button key={t} onClick={()=>setSpilloverType(t)} style={{
+                padding:"7px 12px",borderRadius:6,border:"none",cursor:"pointer",fontSize:11,fontWeight:600,
+                background:spilloverType===t?(t==="above"?"#0a2e1b":"#2d1515"):"#111827",
+                color:spilloverType===t?(t==="above"?"#4ade80":"#f87171"):"#475569",
+                textTransform:"uppercase",letterSpacing:"0.08em",
+              }}>{t==="above"?"Above Table":"Under Table"}</button>
+            ))}
+          </div>
+        </div>
+        {spilloverType==="under"&&<div style={{fontSize:10,color:"#6b4f4f",marginTop:6}}>⚠ Under-table income excluded from tax calc</div>}
+        {spillover>0&&(
+          <div style={{marginTop:12,display:"flex",gap:10,alignItems:"center"}}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:9,color:"#334155",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4}}>Split — Business {spillBizPct}% / Savings {100-spillBizPct}%</div>
+              <input type="range" min={0} max={100} step={5} value={spillBizPct}
+                onChange={e=>setSpillBizPct(+e.target.value)}
+                style={{width:"100%",accentColor:"#6366f1",cursor:"pointer"}}/>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}>
+              <div style={{fontSize:11,color:"#6366f1",fontVariantNumeric:"tabular-nums"}}>Biz {fmt(spillBiz)}</div>
+              <div style={{fontSize:11,color:"#10b981",fontVariantNumeric:"tabular-nums"}}>Save {fmt(spillSav)}</div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div style={{height:6,borderRadius:99,overflow:"hidden",background:"#0d1525",display:"flex",marginBottom:6}}>
+        {cats.map(c=>c.val>0&&<div key={c.id} style={{width:`${(c.val/totalIncome)*100}%`,background:c.color,transition:"width .15s"}}/>)}
+        {taxOwed>0&&<div style={{width:`${(taxOwed/totalIncome)*100}%`,background:"linear-gradient(90deg,#ef4444,#dc2626)",transition:"width .15s"}}/>}
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#334155",marginBottom:20,fontVariantNumeric:"tabular-nums"}}>
+        <span>Allocated <b style={{color:over?"#f87171":"#6366f1"}}>{fmt(totalAlloc)}</b> of <b style={{color:"#475569"}}>{fmt(totalIncome)}</b></span>
+        <span>{over?<b style={{color:"#f87171"}}>Over {fmt(Math.abs(remaining))}</b>:<span>Free <b style={{color:"#475569"}}>{fmt(remaining)}</b></span>}</span>
+      </div>
+
+      {/* Section divider */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+        <div style={{flex:1,height:"1px",background:"#0f1e35"}}/>
+        <div style={{fontSize:9,letterSpacing:"0.15em",color:"#334155",textTransform:"uppercase"}}>Allocations</div>
+        <div style={{flex:1,height:"1px",background:"#0f1e35"}}/>
+      </div>
+
+      {/* Tax row */}
+      <div style={{background:"#130b0b",border:"1px solid #2d1515",borderRadius:10,padding:"12px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{width:3,height:32,background:"#ef4444",borderRadius:99}}/>
+          <div>
+            <div style={{fontSize:13,fontWeight:600,color:"#cbd5e1"}}>Taxes</div>
+            <div style={{fontSize:9,color:"#4b2020",marginTop:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>Auto-calculated · writeoffs reduce this</div>
+          </div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:16,fontWeight:700,color:"#f87171",fontVariantNumeric:"tabular-nums"}}><AnimatedNumber value={taxOwed}/></div>
+          <div style={{fontSize:9,color:"#4b2020"}}>{pct(taxOwed,totalIncome)}% of income</div>
+        </div>
+      </div>
+
+      {/* Sliders */}
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {cats.map(cat=>(
+          <div key={cat.id}
+            onMouseEnter={()=>setHovered(cat.id)} onMouseLeave={()=>setHovered(null)}
+            style={{background:"#0d1525",border:`1px solid ${hovered===cat.id?(cat.deductible?"#1a4030":"#1e3a5f"):(cat.deductible?"#0d2d1f":"#0f1e35")}`,borderRadius:10,padding:"12px 14px",transition:"border-color .2s"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
+                <div style={{width:3,height:32,background:cat.color,borderRadius:99,flexShrink:0}}/>
+                <div style={{minWidth:0}}>
+                  {editId===cat.id?(
+                    <input autoFocus value={cat.label}
+                      onChange={e=>setCats(p=>p.map(c=>c.id===cat.id?{...c,label:e.target.value}:c))}
+                      onBlur={()=>setEditId(null)} onKeyDown={e=>e.key==="Enter"&&setEditId(null)}
+                      style={{...inp,padding:"2px 7px",width:160,fontSize:13,fontWeight:600}}/>
+                  ):(
+                    <div onClick={()=>setEditId(cat.id)} title="Click to rename"
+                      style={{fontSize:13,fontWeight:600,color:"#cbd5e1",cursor:"text",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {cat.label}
+                    </div>
+                  )}
+                  <div style={{fontSize:9,color:"#334155",marginTop:1,fontVariantNumeric:"tabular-nums"}}>{pct(cat.val,totalIncome)}% of income</div>
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:7,flexShrink:0}}>
+                <div style={{fontSize:15,fontWeight:700,color:"#f1f5f9",minWidth:56,textAlign:"right",fontVariantNumeric:"tabular-nums"}}><AnimatedNumber value={cat.val}/></div>
+                <button onClick={()=>toggleDed(cat.id)} style={{fontSize:9,fontWeight:700,padding:"3px 8px",borderRadius:4,cursor:"pointer",border:"none",letterSpacing:"0.08em",textTransform:"uppercase",background:cat.deductible?"#0a2e1b":"#111827",color:cat.deductible?"#4ade80":"#475569",transition:"all .15s"}}>
+                  {cat.deductible?"✓ Writeoff":"Writeoff"}
+                </button>
+                <button onClick={()=>remove(cat.id)} style={{background:"none",border:"none",color:"#1e3a5f",cursor:"pointer",fontSize:16,lineHeight:1,padding:"0 2px",fontWeight:300}}>×</button>
+              </div>
+            </div>
+            <div style={{position:"relative",height:2,background:"#1e293b",borderRadius:99,marginBottom:7}}>
+              <div style={{position:"absolute",left:0,top:0,height:"100%",width:`${(cat.val/cat.max)*100}%`,background:`linear-gradient(90deg,${cat.color}99,${cat.color})`,borderRadius:99,transition:"width .1s"}}/>
+            </div>
+            <div style={{position:"relative"}}>
+              {activeTooltip===cat.id&&(
+                <div style={{position:"absolute",top:-26,left:"50%",transform:"translateX(-50%)",background:"#1e3a5f",color:"#e2e8f0",fontSize:10,padding:"3px 7px",borderRadius:4,pointerEvents:"none",whiteSpace:"nowrap",zIndex:10,fontVariantNumeric:"tabular-nums"}}>
+                  ${Math.round(cat.val).toLocaleString()}
+                </div>
+              )}
+              <input type="range" min={0} max={cat.max} step={10} value={cat.val}
+                onChange={e=>setVal(cat.id,e.target.value)}
+                onMouseDown={()=>setActiveTooltip(cat.id)} onMouseUp={()=>setActiveTooltip(null)}
+                onTouchStart={()=>setActiveTooltip(cat.id)} onTouchEnd={()=>setActiveTooltip(null)}
+                style={{width:"100%",accentColor:cat.color,cursor:"pointer",margin:0}}/>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Add category */}
+      {adding?(
+        <div style={{background:"#0d1525",border:"1px solid #1e3a5f",borderRadius:10,padding:"16px",marginTop:8}}>
+          <div style={{fontSize:9,letterSpacing:"0.14em",color:"#334155",textTransform:"uppercase",marginBottom:12}}>New Category</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <input autoFocus placeholder="Category name" value={newLabel}
+              onChange={e=>setNewLabel(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addCat()} style={inp}/>
+            <div style={{display:"flex",gap:8}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:9,color:"#334155",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.08em"}}>Slider max</div>
+                <input type="number" value={newMax} onChange={e=>setNewMax(e.target.value)} style={inp}/>
+              </div>
+              <div>
+                <div style={{fontSize:9,color:"#334155",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.08em"}}>Writeoff?</div>
+                <button onClick={()=>setNewDed(p=>!p)} style={{padding:"8px 16px",borderRadius:6,border:"none",cursor:"pointer",fontSize:12,fontWeight:600,background:newDed?"#0a2e1b":"#111827",color:newDed?"#4ade80":"#475569"}}>
+                  {newDed?"✓ Yes":"No"}
+                </button>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8,marginTop:4}}>
+              <button onClick={addCat} style={{flex:1,background:"#6366f1",border:"none",borderRadius:6,padding:"9px",color:"#fff",fontSize:13,fontWeight:600,cursor:"pointer"}}>Add Category</button>
+              <button onClick={()=>{setAdding(false);setNewLabel("");}} style={{flex:1,background:"#0f1623",border:"1px solid #1e3a5f",borderRadius:6,padding:"9px",color:"#475569",fontSize:13,cursor:"pointer"}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      ):(
+        <button onClick={()=>setAdding(true)} style={{width:"100%",marginTop:8,background:"#0d1525",border:"1px dashed #1e3a5f",borderRadius:10,padding:"11px",color:"#334155",fontSize:11,cursor:"pointer",fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase"}}>
+          + Add Category
+        </button>
+      )}
+
+      {/* Pie chart */}
+      <div style={{marginTop:32,paddingTop:24,borderTop:"1px solid #0f1e35"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+          <div style={{flex:1,height:"1px",background:"#0f1e35"}}/>
+          <div style={{fontSize:9,letterSpacing:"0.15em",color:"#334155",textTransform:"uppercase"}}>Allocation Breakdown</div>
+          <div style={{flex:1,height:"1px",background:"#0f1e35"}}/>
+        </div>
+        <div style={{display:"flex",gap:28,alignItems:"center",flexWrap:"wrap"}}>
+          <div style={{flexShrink:0}}><PieChart slices={pieSlices} size={190}/></div>
+          <div style={{flex:1,display:"flex",flexDirection:"column",gap:6,minWidth:180}}>
+            {pieSlices.filter(s=>s.val>0&&s.label!=="Unallocated").map((s,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                <div style={{display:"flex",alignItems:"center",gap:7}}>
+                  <div style={{width:7,height:7,borderRadius:2,background:s.color,flexShrink:0}}/>
+                  <span style={{fontSize:11,color:"#64748b"}}>{s.label}</span>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"baseline"}}>
+                  <span style={{fontSize:12,fontWeight:600,color:"#94a3b8",fontVariantNumeric:"tabular-nums"}}>{fmt(s.val)}</span>
+                  <span style={{fontSize:9,color:"#334155",fontVariantNumeric:"tabular-nums"}}>{pct(s.val,totalIncome)}%</span>
+                </div>
+              </div>
+            ))}
+            {remaining>0&&(
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,paddingTop:8,borderTop:"1px solid #0f1e35",marginTop:4}}>
+                <span style={{fontSize:11,color:"#334155"}}>Unallocated</span>
+                <span style={{fontSize:12,fontWeight:600,color:"#334155",fontVariantNumeric:"tabular-nums"}}>{fmt(remaining)}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div style={{marginTop:28,paddingTop:16,borderTop:"1px solid #0f1e35",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:9,color:"#1e3a5f",letterSpacing:"0.08em",textTransform:"uppercase"}}>Owen · {monthLabel(currentDate)}</span>
+        <span style={{fontSize:9,color:"#1e3a5f",letterSpacing:"0.08em"}}>~26% EFFECTIVE RATE</span>
+        <span style={{fontSize:9,color:"#1e3a5f",letterSpacing:"0.08em"}}>v2.0</span>
+      </div>
+
+    </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
